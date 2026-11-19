@@ -300,11 +300,14 @@ def create_recommendations(
                 raise ValueError("AI recommendation exceeds budget")
     except (RuntimeError, ValueError, KeyError, TypeError, ValidationError, json.JSONDecodeError) as exc:
         # Safe operational diagnostics: no user conditions, token, API key or raw response.
-        logger.warning(
-            "AI recommendation fallback: %s %s",
-            type(exc).__name__,
-            str(exc)[:200] if type(exc) is ValueError else "(details omitted)",
-        )
+        if isinstance(exc, ValidationError):
+            error_fields = [
+                {"field": ".".join(map(str, e["loc"])), "type": e["type"]}
+                for e in exc.errors()
+            ]
+            logger.warning("AI recommendation validation failed: %s", error_fields)
+        else:
+            logger.warning("AI recommendation fallback: %s", type(exc).__name__)
         fallback_used = True
         validated = [RecommendationOut.model_validate({
             **candidate,
