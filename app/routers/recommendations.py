@@ -331,10 +331,21 @@ def create_recommendations(
         # Safe operational diagnostics: no user conditions, token, API key or raw response.
         if isinstance(exc, ValidationError):
             error_fields = [
-                {"field": ".".join(map(str, e["loc"])), "type": e["type"]}
+                {
+                    "field": ".".join(map(str, e["loc"])),
+                    "type": e["type"],
+                }
                 for e in exc.errors()
             ]
             logger.warning("AI recommendation validation failed: %s", error_fields)
+
+            if "candidates" in locals():
+                categories = [
+                    str(item.get("placeCategory"))[:50]
+                    for item in candidates
+                    if isinstance(item, dict)
+                ]
+                logger.warning("AI placeCategory values: %s", categories)
         else:
             logger.warning("AI recommendation fallback: %s", type(exc).__name__)
         fallback_used = True
