@@ -74,32 +74,35 @@ def _distance_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> int:
     return round(2 * earth_radius_meters * math.asin(math.sqrt(a)))
 
 
-def _search_kakao_local(
-    *,
-    category: str,
-    latitude: float,
-    longitude: float,
-    radius_meters: int,
-    api_key: str,
-) -> list[dict]:
+# LETIT_KAKAO_DIVERSIFIED_V2
+# Keep the /nearby request and response contract unchanged.
+# A Kakao request yields <=15 results; fetch more candidates and return <=15.
+# Radii at 2000m and 5000m use directional searches to avoid nearest-only saturation.
+def _offset_coordinates(latitude: float, longitude: float, north_m: float, east_m: float) -> tuple[float, float]:
+    lat = latitude + north_m / 111_320
+    longitude_scale = max(abs(math.cos(math.radians(latitude))), 0.01)
+    lon = longitude + east_m / (111_320 * longitude_scale)
+    return lat, lon
+
+
+def _fetch_kakao_page(
+    *, category: str, latitude: float, longitude: float,
+    radius_meters: int, api_key: str, page: int,
+) -> tuple[list[dict], bool]:
     common_params = {
         "x": longitude,
         "y": latitude,
         "radius": radius_meters,
         "sort": "distance",
         "size": MAX_RESULTS,
+        "page": page,
     }
-
     if category == "park":
         endpoint = f"{KAKAO_LOCAL_BASE_URL}/keyword.json"
         params = {**common_params, "query": "공원"}
     else:
         endpoint = f"{KAKAO_LOCAL_BASE_URL}/category.json"
-        params = {
-            **common_params,
-            "category_group_code": KAKAO_CATEGORY_CODES[category],
-        }
-
+        params = {**common_params, "category_group_code": KAKAO_CATEGORY_CODES[category]}
     request = Request(
         f"{endpoint}?{urlencode(params)}",
         headers={"Authorization": f"KakaoAK {api_key}", "Accept": "application/json"},
@@ -110,11 +113,91 @@ def _search_kakao_local(
             payload = json.loads(response.read().decode("utf-8"))
     except (HTTPError, URLError, TimeoutError, OSError, UnicodeDecodeError, json.JSONDecodeError):
         raise HTTPException(status_code=503, detail="장소 검색 서비스를 사용할 수 없습니다.")
-
     documents = payload.get("documents")
     if not isinstance(documents, list):
         raise HTTPException(status_code=503, detail="장소 검색 서비스 응답을 처리할 수 없습니다.")
-    return documents
+    return documents, bool(payload.get("meta", {}).get("is_end", True))
+
+
+def _search_kakao_local(
+    *, category: str, latitude: float, longitude: float,
+    radius_meters: int, api_key: str,
+) -> list[dict]:
+    if radius_meters == 0:
+        return []
+
+    # Always test the original origin first. If it fails, preserve the 503 contract.
+    first, is_end = _fetch_kakao_page(
+        category=category, latitude=latitude, longitude=longitude,
+        radius_meters=radius_meters, api_key=api_key, page=1,
+    )
+    candidates = list(first)
+    jobs = []
+    if not is_end:
+        jobs.extend((latitude, longitude, radius_meters, p) for p in (2, 3))
+
+    # A wider search from the user's location alone may return only nearby shops.
+    # Search four outward sectors, then filter by distance from the ORIGINAL user.
+    if radius_meters >= 2_000:
+        shift = round(radius_meters * 0.58)
+        sector_radius = max(100, round(radius_meters * 0.53))
+        for north, east in ((shift, 0), (-shift, 0), (0, shift), (0, -shift)):
+            lat, lon = _offset_coordinates(latitude, longitude, north, east)
+            if -90 <= lat <= 90 and -180 <= lon <= 180:
+                jobs.append((lat, lon, sector_radius, 1))
+
+    # Extra result pages and sectors are best-effort; first page is mandatory.
+    if jobs:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = [pool.submit(
+                _fetch_kakao_page, category=category, latitude=lat,
+                longitude=lon, radius_meters=radius, api_key=api_key, page=page,
+            ) for lat, lon, radius, page in jobs]
+            for future in as_completed(futures):
+                try:
+                    documents, _ = future.result()
+                    candidates.extend(documents)
+                except HTTPException:
+                    continue
+    return candidates
+
+
+def _select_places(
+    documents: list[dict], latitude: float, longitude: float,
+    radius_meters: int,
+) -> list[NearbyPlace]:
+    by_id: dict[str, NearbyPlace] = {}
+    for doc in documents:
+        try:
+            lat = float(doc["y"])
+            lon = float(doc["x"])
+            if not (math.isfinite(lat) and math.isfinite(lon)):
+                continue
+            # Always measure from the actual user, not shifted query origins.
+            distance = _distance_meters(latitude, longitude, lat, lon)
+            if distance > radius_meters:
+                continue
+            identifier = str(doc["id"])
+            if identifier not in by_id:
+                by_id[identifier] = NearbyPlace(
+                    placeId=identifier,
+                    name=doc["place_name"],
+                    address=doc.get("road_address_name") or doc.get("address_name") or "",
+                    latitude=lat, longitude=lon, distanceMeters=distance,
+                    walkingMinutes=math.ceil(distance / STRAIGHT_LINE_METERS_PER_WALKING_MINUTE),
+                )
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    candidates = sorted(by_id.values(), key=lambda item: item.distanceMeters)
+    # 3–4 stages should contain farther options, rather than just the nearest 15.
+    min_preferred = {2_000: 800, 5_000: 2_000}.get(radius_meters, 0)
+    if min_preferred:
+        preferred = [p for p in candidates if p.distanceMeters >= min_preferred]
+        other = [p for p in candidates if p.distanceMeters < min_preferred]
+        return (preferred + other)[:MAX_RESULTS]
+    return candidates[:MAX_RESULTS]
 
 
 @router.get("/nearby", response_model=NearbyPlacesResponse)
@@ -147,33 +230,5 @@ def get_nearby_places(
         radius_meters=radiusMeters,
         api_key=api_key,
     )
-
-    items: list[NearbyPlace] = []
-    for document in documents:
-        try:
-            place_latitude = float(document["y"])
-            place_longitude = float(document["x"])
-            distance = document.get("distance")
-            if distance in (None, ""):
-                distance = _distance_meters(
-                    latitude, longitude, place_latitude, place_longitude
-                )
-            distance_meters = int(float(distance))
-            items.append(
-                NearbyPlace(
-                    placeId=str(document["id"]),
-                    name=document["place_name"],
-                    address=(document.get("road_address_name") or document.get("address_name") or ""),
-                    latitude=place_latitude,
-                    longitude=place_longitude,
-                    distanceMeters=distance_meters,
-                    walkingMinutes=math.ceil(
-                        distance_meters / STRAIGHT_LINE_METERS_PER_WALKING_MINUTE
-                    ),
-                )
-            )
-        except (KeyError, TypeError, ValueError):
-            # Skip malformed individual rows without discarding valid results.
-            continue
-
+    items = _select_places(documents, latitude, longitude, radiusMeters)
     return NearbyPlacesResponse(items=items, searchRadiusMeters=radiusMeters)
