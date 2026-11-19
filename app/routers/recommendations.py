@@ -125,7 +125,11 @@ def _fallback_recommendations(conditions: MissionConditions) -> list[dict]:
     return result
 
 
-def _request_upstage(conditions: MissionConditions, excluded_titles: list[str]) -> list[dict]:
+def _request_upstage(
+    conditions: MissionConditions,
+    excluded_titles: list[str],
+    additional_instructions: str | None = None,
+) -> list[dict]:
     """Call Upstage's OpenAI-compatible Chat Completions API without extra packages."""
     from urllib.error import HTTPError, URLError
     from urllib.request import Request, urlopen
@@ -147,6 +151,7 @@ def _request_upstage(conditions: MissionConditions, excluded_titles: list[str]) 
         '"steps":[{"order":1,"text":"..."}],'
         '"estimatedDurationMinutes":10,"estimatedCost":0}]}\n'
         f"조건: {json.dumps(prompt_data, ensure_ascii=False)}\n"
+        f"추가 요청: {additional_instructions or '없음'}\n"
         f"제외할 미션 제목: {json.dumps(excluded_titles, ensure_ascii=False)}"
     )
     payload = json.dumps({
