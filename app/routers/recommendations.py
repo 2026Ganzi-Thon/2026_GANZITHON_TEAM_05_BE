@@ -80,49 +80,98 @@ def _get_upstage_api_key() -> str | None:
     return _UpstageSettings().upstage_api_key
 
 
-def _fallback_recommendations(conditions: MissionConditions) -> list[dict]:
-    """Small deterministic demo set used when AI is unavailable or malformed."""
-    energy = conditions.energy_level
-    if conditions.budget_limit == 0:
-        ideas = [
-            ("집 앞 공기 마시기", "현관 밖에서 짧게 바깥 공기를 느껴봐요", "non_place", None, 5, 0,
-             ["편한 옷을 입어요", "신발을 신어요", "현관문을 열어요", "건물 밖에 잠깐 서 있어요", "천천히 돌아와요"]),
-            ("익숙한 길 짧게 걷기", "집 근처 익숙한 길을 천천히 걸어요", "non_place", None, 10, 0,
-             ["편한 신발을 신어요", "집 밖으로 나와요", "익숙한 길을 골라요", "가능한 만큼 천천히 걸어요", "편하게 돌아와요"]),
-        ]
-    elif energy <= 1:
-        ideas = [
-            ("집 앞 공기 마시기", "현관 밖에서 짧게 바깥 공기를 느껴봐요", "non_place", None, 5, 0,
-             ["편한 옷을 입어요", "신발을 신어요", "현관문을 열어요", "건물 밖에 잠깐 서 있어요", "천천히 돌아와요"]),
-            ("가까운 편의점 다녀오기", "부담 없는 거리의 편의점에 다녀와요", "place", "convenience_store", 10, 0,
-             ["외출 준비를 해요", "가까운 편의점을 찾아요", "천천히 걸어가요", "필요하면 물 한 병을 사요", "편한 길로 돌아와요"]),
-        ]
-    else:
-        ideas = [
-            ("동네 한 바퀴 걷기", "무리하지 않는 속도로 주변을 걸어요", "non_place", None, 15, 0,
-             ["걷기 편한 신발을 신어요", "집 밖으로 나와요", "익숙한 길을 걸어요", "잠깐 멈춰 주변을 둘러봐요", "천천히 돌아와요"]),
-            ("조용한 카페에서 쉬기", "가까운 카페에서 잠깐 쉬어가요", "place", "cafe", 25, 5000,
-             ["외출 준비를 해요", "가까운 카페를 찾아요", "편한 길로 이동해요", "음료를 주문하거나 자리에 앉아요", "쉬고 나서 돌아와요"]),
-        ]
+# ENERGY_SCOPE_POLICY_V1: energy is the *only* selector for indoor/outdoor travel scope.
+# Mood, barriers, time, budget and distanceLimit personalize activities *within* that scope.
+ENERGY_SCOPE_RULES = {
+    0: "반드시 집 안에서만 수행. 현관을 넘거나 외출하는 단계 금지.",
+    1: "반드시 현관 밖 또는 집 바로 앞까지만 이동. 다른 장소까지 이동 금지.",
+    2: "반드시 집 밖의 집 주변에서 짧게 활동. 카페·공원 등 목적지 방문은 3단계 이상.",
+    3: "반드시 집 밖의 가까운 특정 장소(공원·편의점·카페 등)를 방문해 활동.",
+    4: "반드시 집 밖의 3단계보다 조금 더 먼 특정 장소를 방문해 활동.",
+}
 
+
+def _scope_violation(item: RecommendationOut, energy: int) -> bool:
+    """Check structured and clearly contradictory text; avoids changing FE API schema.
+
+    Natural-language checks are conservative. For fully strict semantic enforcement,
+    add a separately validated location-scope field in a future API contract revision.
+    """
+    body = " ".join([item.title, item.description, *(s.text for s in item.steps)])
+    if energy <= 2 and item.mission_type != "non_place":
+        return True
+    if energy >= 3 and item.mission_type != "place":
+        return True
+    indoor_action = ("집 안에서", "집안에서", "방 안에서", "방에서 ",
+                     "거실에서", "침대에서", "실내에서", "집에서 스트레칭",
+                     "집에서 독서", "집에서 음악", "집에서 쉬기")
+    outdoor_action = ("밖으로 나", "집 밖", "현관 밖", "집 앞", "바깥", "산책",
+                      "공원", "편의점", "카페", "골목", "동네", "주변 거리")
+    if energy == 0:
+        # Reject obviously outdoor missions and require an explicitly indoor location.
+        if any(w in body for w in outdoor_action):
+            return True
+        return not any(w in body for w in ("집 안", "집안", "방 안", "방에서", "거실", "실내", "집에서"))
+    if energy >= 1 and any(w in body for w in indoor_action):
+        return True
+    if energy == 1:
+        return not any(w in body for w in ("현관", "집 앞", "문 앞", "건물 앞"))
+    if energy == 2:
+        return not any(w in body for w in ("집 근처", "집 주변", "동네", "골목", "집 앞"))
+    if energy == 3:
+        return not any(w in body for w in ("가까운", "근처", "주변", "동네", "도보", "집 앞"))
+    return False
+
+
+def _fallback_recommendations(conditions: MissionConditions) -> list[dict]:
+    """Deterministic alternatives that never change the mobility scope of energy 0–4."""
+    energy = conditions.energy_level
+    cases = {
+        0: [
+            ("집 안에서 창밖 풍경 바라보기", "집 안에서 창문 너머를 바라보며 잠깐 쉬어요", "non_place", None, 5, 0,
+             ["집 안에서 편안한 자리를 찾아요", "창가로 이동해요", "창밖 풍경을 바라봐요", "눈에 띄는 색 세 가지를 찾아요", "집 안에서 편히 마무리해요"]),
+            ("집 안에서 가볍게 몸 풀기", "거실에서 부담 없이 몸을 움직여요", "non_place", None, 5, 0,
+             ["거실에서 편한 자리에 앉아요", "어깨를 천천히 올려요", "힘을 풀어 내려요", "목을 부드럽게 움직여요", "거실에서 편안히 쉬어요"]),
+        ],
+        1: [
+            ("현관 밖에서 바깥 공기 느끼기", "현관 밖까지만 나가 바깥 공기를 느껴요", "non_place", None, 5, 0,
+             ["편한 신발을 신어요", "현관문을 열어요", "현관 밖에 잠깐 서요", "바깥 공기를 느껴요", "다시 집 안으로 돌아와요"]),
+            ("집 바로 앞에서 잠깐 쉬기", "집 앞까지 나가 주변을 둘러봐요", "non_place", None, 5, 0,
+             ["현관에서 외출 준비를 해요", "집 바로 앞까지 나가요", "주변을 천천히 둘러봐요", "잠시 숨을 고르고 쉬어요", "집으로 돌아와요"]),
+        ],
+        2: [
+            ("집 근처 골목 짧게 걷기", "집 근처 골목을 짧게 걷고 돌아와요", "non_place", None, 10, 0,
+             ["편한 신발을 신어요", "집 밖으로 나와요", "집 근처 골목을 걸어요", "주변 풍경을 살펴봐요", "집으로 돌아와요"]),
+            ("집 주변 잠깐 한 바퀴", "집 주변을 가볍게 둘러본 뒤 돌아와요", "non_place", None, 10, 0,
+             ["외출 준비를 해요", "집 밖으로 나와요", "집 주변의 익숙한 길로 가요", "잠깐 멈춰 숨을 고르세요", "천천히 집으로 돌아와요"]),
+        ],
+        3: [
+            ("가까운 공원 잠깐 방문하기", "가까운 공원에 가서 잠시 쉬어요", "place", "park", 20, 0,
+             ["편한 신발을 신어요", "가까운 공원을 찾아요", "공원까지 이동해요", "공원에서 잠깐 쉬어요", "집으로 돌아와요"]),
+            ("근처 편의점 들러보기", "근처 편의점을 방문하고 돌아와요. 구매는 필수가 아니에요", "place", "convenience_store", 15, 0,
+             ["가볍게 외출 준비를 해요", "근처 편의점을 찾아요", "편의점까지 걸어요", "편의점에 잠깐 들러요", "천천히 집으로 돌아와요"]),
+        ],
+        4: [
+            ("조금 먼 공원 탐방하기", "조금 더 떨어진 공원에 가서 둘러봐요", "place", "park", 30, 0,
+             ["방문할 공원을 골라요", "외출 준비를 해요", "공원까지 이동해요", "공원에서 풍경을 감상해요", "집으로 돌아와요"]),
+            ("평소보다 먼 편의점 방문하기", "집에서 조금 더 떨어진 편의점에 가봐요. 구매는 자유예요", "place", "convenience_store", 25, 0,
+             ["방문할 편의점을 골라요", "편한 신발을 신어요", "편의점까지 이동해요", "매장에 잠깐 들러요", "집으로 돌아와요"]),
+        ],
+    }
     time_cap = {"10min": 10, "30min": 30, "60min": 60}.get(conditions.time_limit)
-    result = []
-    for title, description, mission_type, category, minutes, cost, step_texts in ideas:
-        if time_cap is not None:
-            minutes = min(minutes, time_cap)
-        if conditions.budget_limit is not None:
-            cost = min(cost, conditions.budget_limit)
-        result.append({
+    results = []
+    for title, description, mission_type, category, minutes, cost, texts in cases[energy]:
+        results.append({
             "title": title,
             "description": description,
             "energyLevel": energy,
             "missionType": mission_type,
             "placeCategory": category,
-            "steps": [{"order": i, "text": text} for i, text in enumerate(step_texts, 1)],
-            "estimatedDurationMinutes": minutes,
+            "steps": [{"order": idx, "text": step} for idx, step in enumerate(texts, 1)],
+            "estimatedDurationMinutes": min(minutes, time_cap) if time_cap else minutes,
             "estimatedCost": cost,
         })
-    return result
+    return results
 
 
 def _request_upstage(
@@ -141,6 +190,15 @@ def _request_upstage(
     prompt_data = conditions.model_dump(by_alias=True)
     prompt = (
         "다음 조건에 맞는 부담이 적고 안전한 일상 미션을 정확히 2개 만들어 주세요. "
+        "절대 규칙: 외출 장소와 이동 범위는 energyLevel 하나로만 결정합니다. "
+        f"energyLevel={conditions.energy_level}: {ENERGY_SCOPE_RULES[conditions.energy_level]} "
+        "0~2단계는 missionType=non_place, 3~4단계는 missionType=place입니다. "
+        "3~4단계에서는 집 안 활동을 절대로 추천하지 마세요. "
+        "0단계는 반드시 집 안 활동만 추천하세요. "
+        "mood, barriers, distanceLimit, timeLimit, budgetLimit는 정해진 이동 범위 안에서 "
+        "활동의 종류와 난이도, 시간, 비용만 조정합니다. "
+        "distanceLimit가 에너지 단계와 충돌하면 반드시 에너지 단계를 우선합니다. "
+        "집 안·집 밖·집 앞·가까운 장소 등 위치를 제목과 설명, 단계에도 명확히 적으세요. "
         "한국어로 작성하고, 선택한 예산과 시간 범위를 넘지 마세요. "
         "장소를 특정해야 하는 미션은 missionType=place와 placeCategory를 지정하고, "
         "그 외에는 missionType=non_place, placeCategory=null로 작성하세요. "
@@ -214,6 +272,8 @@ def create_recommendations(
                 raise ValueError("AI recommendation energy level does not match input")
             if (item.mission_type == "place") != (item.place_category is not None):
                 raise ValueError("AI recommendation place type/category mismatch")
+            if _scope_violation(item, body.conditions.energy_level):
+                raise ValueError("AI recommendation violates energy-level location scope")
             if item.estimated_duration_minutes <= 0 or item.estimated_cost < 0:
                 raise ValueError("AI recommendation estimates are invalid")
             if body.conditions.time_limit != "any":
