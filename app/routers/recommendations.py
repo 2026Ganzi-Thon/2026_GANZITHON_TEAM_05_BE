@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from functools import lru_cache
 from typing import Literal
@@ -18,6 +19,7 @@ from app.models import Recommendation, User
 from app.security import current_user
 
 router = APIRouter(prefix="/missions", tags=["미션 추천"])
+logger = logging.getLogger(__name__)
 
 Mood = Literal["lethargic", "depressed", "anxious", "refresh", "unsure"]
 Barrier = Literal["tired", "preparation", "crowded", "alone", "cost", "no_reason"]
@@ -216,7 +218,9 @@ def _request_upstage(
         "제외할 기존 미션과 제목이 겹치지 않게 하세요. 설명이나 마크다운 없이 JSON 객체만 반환하세요.\n"
         '형식: {"recommendations":[{"title":"...","description":"...",'
         '"energyLevel":0,"missionType":"non_place","placeCategory":null,'
-        '"steps":[{"order":1,"text":"..."}],'
+        '"steps":[{"order":1,"text":"준비해요"},{"order":2,"text":"이동해요"},'
+        '{"order":3,"text":"활동해요"},{"order":4,"text":"주변을 살펴요"},'
+        '{"order":5,"text":"마무리해요"}],'
         '"estimatedDurationMinutes":10,"estimatedCost":0}]}\n'
         f"조건: {json.dumps(prompt_data, ensure_ascii=False)}\n"
         f"추가 요청: {additional_instructions or '없음'}\n"
@@ -294,7 +298,13 @@ def create_recommendations(
                     raise ValueError("AI recommendation exceeds time limit")
             if body.conditions.budget_limit is not None and item.estimated_cost > body.conditions.budget_limit:
                 raise ValueError("AI recommendation exceeds budget")
-    except (RuntimeError, ValueError, KeyError, TypeError, ValidationError, json.JSONDecodeError):
+    except (RuntimeError, ValueError, KeyError, TypeError, ValidationError, json.JSONDecodeError) as exc:
+        # Safe operational diagnostics: no user conditions, token, API key or raw response.
+        logger.warning(
+            "AI recommendation fallback: %s %s",
+            type(exc).__name__,
+            str(exc)[:200] if type(exc) is ValueError else "(details omitted)",
+        )
         fallback_used = True
         validated = [RecommendationOut.model_validate({
             **candidate,
