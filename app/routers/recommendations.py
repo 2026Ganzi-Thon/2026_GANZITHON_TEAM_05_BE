@@ -212,6 +212,8 @@ def _request_upstage(
         "실제 교통·도보 소요시간을 보장하거나 특정 장소명을 지어내지 마세요. "
         "집 안·집 밖·집 앞·가까운 장소 등 위치를 제목과 설명, 단계에도 명확히 적으세요. "
         "한국어로 작성하고, 선택한 예산과 시간 범위를 넘지 마세요. "
+        "placeCategory는 convenience_store, park, cafe, other 중 하나만 사용하세요. "
+        "커피숍은 cafe, 편의점은 convenience_store, 공원은 park로 표기하세요. "
         "장소를 특정해야 하는 미션은 missionType=place와 placeCategory를 지정하고, "
         "그 외에는 missionType=non_place, placeCategory=null로 작성하세요. "
         "각 미션의 steps는 실행 가능한 순서로 정확히 5개 작성하세요. "
@@ -253,6 +255,32 @@ def _request_upstage(
     return recommendations
 
 
+def _normalize_ai_place_category(candidate: dict) -> dict:
+    """Convert only unambiguous AI category aliases to contract values."""
+    value = candidate.get("placeCategory")
+    if not isinstance(value, str):
+        return candidate
+    aliases = {
+        "cafe": "cafe",
+        "coffee_shop": "cafe",
+        "coffee shop": "cafe",
+        "coffeehouse": "cafe",
+        "카페": "cafe",
+        "park": "park",
+        "public_park": "park",
+        "공원": "park",
+        "convenience_store": "convenience_store",
+        "convenience-store": "convenience_store",
+        "convenience store": "convenience_store",
+        "편의점": "convenience_store",
+        "other": "other",
+    }
+    normalized = aliases.get(value.strip().lower())
+    if normalized is None or normalized == value:
+        return candidate
+    return {**candidate, "placeCategory": normalized}
+
+
 @router.post("/recommendations", response_model=RecommendationsOut)
 def create_recommendations(
     body: RecommendationsIn,
@@ -272,6 +300,7 @@ def create_recommendations(
     fallback_used = False
     try:
         candidates = _request_upstage(body.conditions, excluded_titles)
+        candidates = [_normalize_ai_place_category(item) for item in candidates]
         # Validate model-controlled fields before they are persisted.
         validated = [RecommendationOut.model_validate({
             **candidate,
