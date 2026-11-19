@@ -20,6 +20,7 @@ from app.routers.recommendations import (
     _request_upstage,
 )
 from app.security import current_user
+from app.services.record_service import on_mission_changed
 
 router = APIRouter(prefix="/missions", tags=["대체 미션"])
 
@@ -244,6 +245,9 @@ def replace_mission(
                 text=step["text"],
                 is_completed=False,
             ))
+        on_mission_changed(db, old_mission)
+        on_mission_changed(db, new_mission)
+        
         db.commit()
     except (KeyError, TypeError, ValueError) as exc:
         db.rollback()
