@@ -80,87 +80,95 @@ def _get_upstage_api_key() -> str | None:
     return _UpstageSettings().upstage_api_key
 
 
-# ENERGY_SCOPE_POLICY_V1: energy is the *only* selector for indoor/outdoor travel scope.
-# Mood, barriers, time, budget and distanceLimit personalize activities *within* that scope.
+# ENERGY_SCOPE_POLICY_V2: the energy level alone selects the travel radius.
+# Radii are straight-line search bounds, not actual walking/transit travel times.
+# 0=indoors, 1=within 200m, 2=within 800m, 3=within 2km, 4=within 5km.
+# Mood, barriers and limits choose activities within the selected scope.
 ENERGY_SCOPE_RULES = {
-    0: "반드시 집 안에서만 수행. 현관을 넘거나 외출하는 단계 금지.",
-    1: "반드시 현관 밖 또는 집 바로 앞까지만 이동. 다른 장소까지 이동 금지.",
-    2: "반드시 집 밖의 집 주변에서 짧게 활동. 카페·공원 등 목적지 방문은 3단계 이상.",
-    3: "반드시 집 밖의 가까운 특정 장소(공원·편의점·카페 등)를 방문해 활동.",
-    4: "반드시 집 밖의 3단계보다 조금 더 먼 특정 장소를 방문해 활동.",
+    0: "집 안에서만 수행. 현관문 밖으로 나가는 활동은 금지. 베란다나 테라스가 필요한 미션은 두 개 중 최대 하나만 허용.",
+    1: "건물 밖으로 반드시 나가기. 집 바로 앞이나 근처에서 직선거리 200m 이내 외부 활동. 장소 방문도 가능.",
+    2: "건물 밖으로 반드시 나가기. 동네 주변 직선거리 800m 이내에서 활동. 카페·공원·편의점 방문도 가능.",
+    3: "집 밖에서 가까운 외부 장소에 가서 활동. 검색 반경 직선거리 2km 이내. 실내에서 끝나는 활동 금지.",
+    4: "집 밖에서 더 먼 외부 장소를 방문해 활동. 검색 반경 직선거리 5km 이내. 실내에서 끝나는 활동 금지.",
 }
 
 
+# These checks catch clear indoor missions and incompatible structured fields.
+# Semantic location constraints require integration tests with real AI responses.
 def _scope_violation(item: RecommendationOut, energy: int) -> bool:
-    """Check structured and clearly contradictory text; avoids changing FE API schema.
-
-    Natural-language checks are conservative. For fully strict semantic enforcement,
-    add a separately validated location-scope field in a future API contract revision.
-    """
-    body = " ".join([item.title, item.description, *(s.text for s in item.steps)])
-    if energy <= 2 and item.mission_type != "non_place":
-        return True
-    if energy >= 3 and item.mission_type != "place":
-        return True
-    indoor_action = ("집 안에서", "집안에서", "방 안에서", "방에서 ",
-                     "거실에서", "침대에서", "실내에서", "집에서 스트레칭",
-                     "집에서 독서", "집에서 음악", "집에서 쉬기")
-    outdoor_action = ("밖으로 나", "집 밖", "현관 밖", "집 앞", "바깥", "산책",
-                      "공원", "편의점", "카페", "골목", "동네", "주변 거리")
+    main = f"{item.title} {item.description}"
+    body = " ".join([main, *(step.text for step in item.steps)])
+    indoor_only = ("집 안에서", "집안에서", "방 안에서", "거실에서", "침대에서",
+                   "실내에서", "베란다에서", "창가에서", "창문 앞에서",
+                   "집에서 스트레칭", "집에서 독서", "집에서 음악", "집에서 쉬기")
+    outdoor = ("건물 밖", "현관 밖", "집 밖", "집 앞", "바깥", "산책", "공원",
+               "편의점", "카페", "골목", "동네", "거리 걷", "외출", "방문", "걷기")
     if energy == 0:
-        # Reject obviously outdoor missions and require an explicitly indoor location.
-        if any(w in body for w in outdoor_action):
+        if item.mission_type != "non_place":
             return True
-        return not any(w in body for w in ("집 안", "집안", "방 안", "방에서", "거실", "실내", "집에서"))
-    if energy >= 1 and any(w in body for w in indoor_action):
+        # A few outdoor terms can appear as parts of indoor tasks ("창밖 풍경").
+        outdoor_actions = ("건물 밖으로", "현관 밖으로", "집 밖으로", "밖으로 나가",
+                           "산책하", "공원에 가", "편의점에 가", "카페에 가", "동네를 걷")
+        return any(term in body for term in outdoor_actions) or not any(
+            term in body for term in ("집 안", "집안", "거실", "방 안", "방에서", "실내", "집에서", "창가")
+        )
+    # Indoors as the mission itself is disallowed; preparation indoors is fine.
+    if any(term in main for term in indoor_only):
         return True
-    if energy == 1:
-        return not any(w in body for w in ("현관", "집 앞", "문 앞", "건물 앞"))
-    if energy == 2:
-        return not any(w in body for w in ("집 근처", "집 주변", "동네", "골목", "집 앞"))
-    if energy == 3:
-        return not any(w in body for w in ("가까운", "근처", "주변", "동네", "도보", "집 앞"))
+    if energy in (3, 4) and item.mission_type != "place":
+        return True
+    if energy in (1, 2) and not any(term in body for term in outdoor):
+        return True
+    if energy == 1 and not any(term in body for term in ("집 앞", "건물 앞", "현관 밖", "집 바로", "가까운", "근처", "주변")):
+        return True
+    if energy == 2 and not any(term in body for term in ("집 근처", "동네", "주변", "근처", "가까운", "골목")):
+        return True
     return False
 
 
+def _special_facility_mission(item: RecommendationOut) -> bool:
+    main = f"{item.title} {item.description}"
+    return any(term in main for term in ("베란다", "발코니", "테라스", "마당", "옥상"))
+
+
 def _fallback_recommendations(conditions: MissionConditions) -> list[dict]:
-    """Deterministic alternatives that never change the mobility scope of energy 0–4."""
+    """Two zero-cost, scope-compatible backup missions for each level."""
     energy = conditions.energy_level
     cases = {
         0: [
-            ("집 안에서 창밖 풍경 바라보기", "집 안에서 창문 너머를 바라보며 잠깐 쉬어요", "non_place", None, 5, 0,
-             ["집 안에서 편안한 자리를 찾아요", "창가로 이동해요", "창밖 풍경을 바라봐요", "눈에 띄는 색 세 가지를 찾아요", "집 안에서 편히 마무리해요"]),
-            ("집 안에서 가볍게 몸 풀기", "거실에서 부담 없이 몸을 움직여요", "non_place", None, 5, 0,
-             ["거실에서 편한 자리에 앉아요", "어깨를 천천히 올려요", "힘을 풀어 내려요", "목을 부드럽게 움직여요", "거실에서 편안히 쉬어요"]),
+            ("집 안에서 가볍게 몸 풀기", "집 안의 편안한 공간에서 부담 없이 움직여요", "non_place", None, 5,
+             ["집 안에서 편하게 서거나 앉아요", "어깨를 천천히 돌려요", "목을 부드럽게 움직여요", "양팔을 가볍게 늘려요", "편하게 쉬어요"]),
+            ("집 안에서 마음 환기하기", "집 안에서 창밖을 바라보며 잠시 쉬어요", "non_place", None, 5,
+             ["집 안의 편한 자리를 찾아요", "창문 너머를 천천히 바라봐요", "눈에 들어오는 색 세 가지를 찾아요", "깊게 숨을 쉬어요", "편안히 마무리해요"]),
         ],
         1: [
-            ("현관 밖에서 바깥 공기 느끼기", "현관 밖까지만 나가 바깥 공기를 느껴요", "non_place", None, 5, 0,
-             ["편한 신발을 신어요", "현관문을 열어요", "현관 밖에 잠깐 서요", "바깥 공기를 느껴요", "다시 집 안으로 돌아와요"]),
-            ("집 바로 앞에서 잠깐 쉬기", "집 앞까지 나가 주변을 둘러봐요", "non_place", None, 5, 0,
-             ["현관에서 외출 준비를 해요", "집 바로 앞까지 나가요", "주변을 천천히 둘러봐요", "잠시 숨을 고르고 쉬어요", "집으로 돌아와요"]),
+            ("건물 앞에서 바깥 공기 느끼기", "건물 밖으로 나가 집 바로 앞에서 잠깐 쉬어요", "non_place", None, 5,
+             ["신발을 신어요", "건물 밖으로 나가요", "집 앞 안전한 곳에 서요", "바깥 공기를 느껴요", "집으로 돌아와요"]),
+            ("집 앞에서 주변 풍경 살펴보기", "건물 밖 집 앞에서 새로운 풍경을 찾아봐요", "non_place", None, 5,
+             ["가볍게 준비해요", "집 앞 건물 밖으로 나가요", "주변 풍경을 둘러봐요", "좋아 보이는 풍경 하나를 찾아요", "집으로 돌아와요"]),
         ],
         2: [
-            ("집 근처 골목 짧게 걷기", "집 근처 골목을 짧게 걷고 돌아와요", "non_place", None, 10, 0,
-             ["편한 신발을 신어요", "집 밖으로 나와요", "집 근처 골목을 걸어요", "주변 풍경을 살펴봐요", "집으로 돌아와요"]),
-            ("집 주변 잠깐 한 바퀴", "집 주변을 가볍게 둘러본 뒤 돌아와요", "non_place", None, 10, 0,
-             ["외출 준비를 해요", "집 밖으로 나와요", "집 주변의 익숙한 길로 가요", "잠깐 멈춰 숨을 고르세요", "천천히 집으로 돌아와요"]),
+            ("동네 골목 짧게 산책하기", "집 근처 동네 골목에서 짧게 걸어요", "non_place", None, 10,
+             ["신발을 신어요", "건물 밖으로 나가요", "집 근처 골목을 걸어요", "동네 풍경을 둘러봐요", "집으로 돌아와요"]),
+            ("동네 가까운 공원 방문하기", "집 근처의 가까운 공원에 잠시 다녀와요", "place", "park", 10,
+             ["외출 준비를 해요", "가까운 동네 공원을 찾아요", "공원에 걸어가요", "공원에서 잠시 쉬어요", "집으로 돌아와요"]),
         ],
         3: [
-            ("가까운 공원 잠깐 방문하기", "가까운 공원에 가서 잠시 쉬어요", "place", "park", 20, 0,
-             ["편한 신발을 신어요", "가까운 공원을 찾아요", "공원까지 이동해요", "공원에서 잠깐 쉬어요", "집으로 돌아와요"]),
-            ("근처 편의점 들러보기", "근처 편의점을 방문하고 돌아와요. 구매는 필수가 아니에요", "place", "convenience_store", 15, 0,
-             ["가볍게 외출 준비를 해요", "근처 편의점을 찾아요", "편의점까지 걸어요", "편의점에 잠깐 들러요", "천천히 집으로 돌아와요"]),
+            ("가까운 공원 방문하기", "가까운 외부 장소인 공원에 다녀와요", "place", "park", 20,
+             ["공원 위치를 확인해요", "외출 준비를 해요", "공원으로 이동해요", "공원에서 잠깐 쉬어요", "집으로 돌아와요"]),
+            ("가까운 동네 카페 들러보기", "가까운 외부 장소인 카페에 들러보세요. 주문은 선택이에요", "place", "cafe", 20,
+             ["카페를 선택해요", "외출 준비를 해요", "카페까지 이동해요", "카페 근처에서 잠시 쉬어요", "집으로 돌아와요"]),
         ],
         4: [
-            ("조금 먼 공원 탐방하기", "조금 더 떨어진 공원에 가서 둘러봐요", "place", "park", 30, 0,
-             ["방문할 공원을 골라요", "외출 준비를 해요", "공원까지 이동해요", "공원에서 풍경을 감상해요", "집으로 돌아와요"]),
-            ("평소보다 먼 편의점 방문하기", "집에서 조금 더 떨어진 편의점에 가봐요. 구매는 자유예요", "place", "convenience_store", 25, 0,
-             ["방문할 편의점을 골라요", "편한 신발을 신어요", "편의점까지 이동해요", "매장에 잠깐 들러요", "집으로 돌아와요"]),
+            ("조금 먼 공원 방문하기", "평소보다 조금 먼 외부 장소의 공원으로 나가요", "place", "park", 30,
+             ["가볼 공원을 골라요", "외출 준비를 해요", "공원으로 이동해요", "공원에서 풍경을 바라봐요", "집으로 돌아와요"]),
+            ("조금 먼 동네 카페 방문하기", "조금 떨어진 동네의 외부 장소인 카페에 가봐요. 주문은 선택이에요", "place", "cafe", 30,
+             ["카페를 골라요", "외출 준비를 해요", "카페로 이동해요", "주변을 잠시 둘러봐요", "집으로 돌아와요"]),
         ],
     }
     time_cap = {"10min": 10, "30min": 30, "60min": 60}.get(conditions.time_limit)
     results = []
-    for title, description, mission_type, category, minutes, cost, texts in cases[energy]:
+    for title, description, mission_type, category, minutes, texts in cases[energy]:
         results.append({
             "title": title,
             "description": description,
@@ -169,7 +177,7 @@ def _fallback_recommendations(conditions: MissionConditions) -> list[dict]:
             "placeCategory": category,
             "steps": [{"order": idx, "text": step} for idx, step in enumerate(texts, 1)],
             "estimatedDurationMinutes": min(minutes, time_cap) if time_cap else minutes,
-            "estimatedCost": cost,
+            "estimatedCost": 0,
         })
     return results
 
@@ -192,12 +200,14 @@ def _request_upstage(
         "다음 조건에 맞는 부담이 적고 안전한 일상 미션을 정확히 2개 만들어 주세요. "
         "절대 규칙: 외출 장소와 이동 범위는 energyLevel 하나로만 결정합니다. "
         f"energyLevel={conditions.energy_level}: {ENERGY_SCOPE_RULES[conditions.energy_level]} "
-        "0~2단계는 missionType=non_place, 3~4단계는 missionType=place입니다. "
-        "3~4단계에서는 집 안 활동을 절대로 추천하지 마세요. "
-        "0단계는 반드시 집 안 활동만 추천하세요. "
+        "0단계는 missionType=non_place이며 1~2단계는 place와 non_place 모두 허용됩니다. 3~4단계는 place입니다. "
+        "1~4단계에서는 반드시 건물 밖에서 활동해야 합니다. 집 안 활동을 절대로 추천하지 마세요. "
+        "0단계는 반드시 집 안 활동만 추천하고 두 추천 모두 베란다·테라스처럼 특정 시설을 요구하면 안 됩니다. "
         "mood, barriers, distanceLimit, timeLimit, budgetLimit는 정해진 이동 범위 안에서 "
         "활동의 종류와 난이도, 시간, 비용만 조정합니다. "
         "distanceLimit가 에너지 단계와 충돌하면 반드시 에너지 단계를 우선합니다. "
+        "카카오 장소 검색 반경은 1단계 200m, 2단계 800m, 3단계 2km, 4단계 5km입니다. "
+        "실제 교통·도보 소요시간을 보장하거나 특정 장소명을 지어내지 마세요. "
         "집 안·집 밖·집 앞·가까운 장소 등 위치를 제목과 설명, 단계에도 명확히 적으세요. "
         "한국어로 작성하고, 선택한 예산과 시간 범위를 넘지 마세요. "
         "장소를 특정해야 하는 미션은 missionType=place와 placeCategory를 지정하고, "
@@ -267,6 +277,8 @@ def create_recommendations(
                 for step in candidate["steps"]
             ],
         }) for candidate in candidates]
+        if body.conditions.energy_level == 0 and all(_special_facility_mission(item) for item in validated):
+            raise ValueError("Both indoor missions need special housing facilities")
         for item in validated:
             if item.energy_level != body.conditions.energy_level:
                 raise ValueError("AI recommendation energy level does not match input")
