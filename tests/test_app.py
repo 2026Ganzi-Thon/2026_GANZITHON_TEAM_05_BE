@@ -30,5 +30,6 @@ def test_health_auth_defaults():
         payload = {'mood':None,'energyLevel':2,'barriers':['crowded'],'distanceLimit':'10min','timeLimit':'30min','budgetLimit':5000}
         assert c.put('/api/v1/users/me/defaults',headers=headers,json=payload).json()['onboardingCompleted'] is True
         assert c.get('/api/v1/users/me/defaults',headers=headers).json()['barriers'] == ['crowded']
-    Base.metadata.drop_all(bind=engine)
-    Path('test_letit.db').unlink(missing_ok=True)
+        Base.metadata.drop_all(bind=engine)
+        engine.dispose()
+        Path('test_letit.db').unlink(missing_ok=True)

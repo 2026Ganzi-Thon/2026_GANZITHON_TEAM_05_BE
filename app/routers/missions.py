@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import Mission, MissionReview, MissionStep, Recommendation, User
 from app.security import current_user
+from app.services.record_service import on_mission_changed, activity_date
 
 router = APIRouter(prefix="/missions", tags=["미션 수행"])
 RESUMABLE_DAYS = 7
@@ -121,6 +122,8 @@ class CompletedOut(BaseModel):
     status: Literal["completed"]
     completed_at: datetime = Field(alias="completedAt")
     completed_count: int = Field(alias="completedCount")
+    daily_status: str = Field(alias="dailyStatus")
+    new_flower_pending: bool = Field(alias="newFlowerPending")
 
 
 class ResumableMissionOut(BaseModel):
@@ -242,6 +245,7 @@ def start_mission(
                 text=source["text"],
                 is_completed=False,
             ))
+        on_mission_changed(db, mission)
         db.commit()
     except HTTPException:
         db.rollback()
@@ -355,6 +359,7 @@ def save_mission_progress(
     if completed == len(steps):
         raise HTTPException(status_code=400, detail="모든 단계를 완료한 미션은 진행 저장할 수 없습니다.")
     mission.status = "paused"
+    on_mission_changed(db, mission)
     db.commit()
     return SavedProgressOut(
         missionId=mission.id,
@@ -379,14 +384,27 @@ def complete_mission(
     completed = len(_completed_ids(steps))
     if completed != len(steps) or not steps:
         raise HTTPException(status_code=400, detail="완료하지 않은 단계가 있습니다.")
+    previous_day = activity_date(mission)
+
     mission.status = "completed"
     mission.completed_at = datetime.now(timezone.utc)
+
+    projection = on_mission_changed(
+        db,
+        mission,
+        previous_date=previous_day
+    )
+
     db.commit()
     return CompletedOut(
         missionId=mission.id,
         status="completed",
         completedAt=mission.completed_at,
         completedCount=completed,
+        dailyStatus=projection["dailyStatuses"][
+            activity_date(mission).isoformat()
+        ],
+        newFlowerPending=bool(projection["newFlowerNumbers"]),
     )
 
 
@@ -403,6 +421,7 @@ def resume_mission(
         raise HTTPException(status_code=410, detail="미션 시작 후 7일이 지나 이어할 수 없습니다.")
     mission.status = "in_progress"
     steps = _mission_steps(db, mission.id)
+    on_mission_changed(db, mission)
     db.commit()
     return ResumedOut(missionId=mission.id, status="in_progress", completedStepIds=_completed_ids(steps))
 
@@ -417,5 +436,6 @@ def abandon_mission(
     if mission.status not in {"in_progress", "paused"}:
         raise HTTPException(status_code=400, detail="진행 중이거나 저장된 미션만 그만둘 수 있습니다.")
     mission.status = "abandoned"
+    on_mission_changed(db, mission)
     db.commit()
     return AbandonedOut(missionId=mission.id, status="abandoned", removedFromResumable=True)
