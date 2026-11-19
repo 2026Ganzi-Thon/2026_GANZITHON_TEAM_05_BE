@@ -244,7 +244,10 @@ def create_recommendations(
                 energy_level=item.energy_level,
                 mission_type=item.mission_type,
                 place_category=item.place_category,
-                steps=[step.model_dump(by_alias=True) for step in item.steps],
+                steps=[
+                    {**step.model_dump(by_alias=True), "stepId": str(step.step_id)}
+                    for step in item.steps
+                ],
                 conditions=body.conditions.model_dump(by_alias=True),
                 estimated_duration_minutes=item.estimated_duration_minutes,
                 estimated_cost=item.estimated_cost,
