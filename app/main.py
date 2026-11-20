@@ -2,10 +2,12 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from slowapi.errors import RateLimitExceeded
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from app.config import get_settings
 from app.database import engine
+from app.rate_limit import limiter
 from app.routers import (
     auth,
     users,
@@ -18,6 +20,20 @@ from app.routers import (
 )
 
 app = FastAPI(title='Letit Backend API', version='0.1.0', description='26개 중 인증 2개/기본값 2개 구현; 나머지는 개발 예정')
+app.state.limiter = limiter
+
+
+async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded):
+    return JSONResponse(
+        status_code=429,
+        content={
+            'detail': '요청이 너무 많습니다. 잠시 후 다시 시도해 주세요.',
+            'code': 'RATE_LIMITED',
+        },
+    )
+
+
+app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
 app.add_middleware(CORSMiddleware, allow_origins=get_settings().allowed_origins,
                    allow_credentials=True, allow_methods=['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
                    allow_headers=['Authorization','Content-Type'])
