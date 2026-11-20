@@ -37,5 +37,5 @@ def get_defaults(user: User = Depends(current_user), db: Session = Depends(get_d
     row = db.get(UserDefaults, user.id)
     if row is None:
         return DefaultsOut(mood=None, energyLevel=1, barriers=[], distanceLimit='10min',
-                           timeLimit='30min', budgetLimit=5000, onboardingCompleted=False)
+                           timeLimit='30min', budgetLimit=10000, onboardingCompleted=False)
     return to_schema(row)

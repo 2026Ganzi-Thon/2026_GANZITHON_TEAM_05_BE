@@ -36,7 +36,7 @@ class MissionConditions(BaseModel):
     barriers: list[Barrier] = Field(default_factory=list)
     distance_limit: DistanceLimit = Field(alias="distanceLimit")
     time_limit: TimeLimit = Field(alias="timeLimit")
-    budget_limit: Literal[0, 5000, 10000] | None = Field(alias="budgetLimit")
+    budget_limit: Literal[0, 10000, 50000] | None = Field(alias="budgetLimit")
 
 
 class RecommendationsIn(BaseModel):

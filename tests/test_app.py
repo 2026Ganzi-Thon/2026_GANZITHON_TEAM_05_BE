@@ -27,7 +27,7 @@ def test_health_auth_defaults():
         assert c.post('/api/v1/auth/login', json={'username':'newuser','password':'test-password-0123'}).status_code == 200
         headers = {'Authorization':f'Bearer {jwt}'}
         assert c.get('/api/v1/users/me/defaults',headers=headers).json()['onboardingCompleted'] is False
-        payload = {'mood':None,'energyLevel':2,'barriers':['crowded'],'distanceLimit':'10min','timeLimit':'30min','budgetLimit':5000}
+        payload = {'mood':None,'energyLevel':2,'barriers':['crowded'],'distanceLimit':'10min','timeLimit':'30min','budgetLimit':50000}
         assert c.put('/api/v1/users/me/defaults',headers=headers,json=payload).json()['onboardingCompleted'] is True
         assert c.get('/api/v1/users/me/defaults',headers=headers).json()['barriers'] == ['crowded']
         Base.metadata.drop_all(bind=engine)

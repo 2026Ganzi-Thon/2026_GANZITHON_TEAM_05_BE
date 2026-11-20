@@ -35,8 +35,9 @@ class DefaultsIn(APIModel):
     barriers: list[Literal['tired','preparation','crowded','alone','cost','no_reason']] = Field(default_factory=list)
     distanceLimit: Literal['5min','10min','20min','any']
     timeLimit: Literal['10min','30min','60min','any']
-    budgetLimit: Literal[0,5000,10000] | None
+    budgetLimit: Literal[0,10000,50000] | None
 
 
 class DefaultsOut(DefaultsIn):
+    budgetLimit: Literal[0, 5000, 10000, 50000] | None
     onboardingCompleted: bool
