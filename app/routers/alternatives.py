@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import Mission, MissionStep, Recommendation, User
+from app.routers.missions import PlaceSnapshotIn
 from app.routers.recommendations import (
     MissionConditions,
     RecommendationOut,
@@ -36,6 +37,7 @@ class ReplaceIn(BaseModel):
 
     recommendation_id: UUID = Field(alias="recommendationId")
     place_id: str | None = Field(alias="placeId")
+    place: PlaceSnapshotIn | None = None
 
 
 class ReplaceOut(BaseModel):
@@ -216,6 +218,10 @@ def replace_mission(
         raise HTTPException(status_code=400, detail="장소 미션에는 장소를 선택해야 합니다.")
     if recommendation.mission_type == "non_place" and body.place_id is not None:
         raise HTTPException(status_code=400, detail="장소가 없는 미션에는 placeId를 보낼 수 없습니다.")
+    if body.place is not None and body.place.placeId != body.place_id:
+        raise HTTPException(status_code=400, detail="선택한 장소 ID가 일치하지 않습니다.")
+    if recommendation.mission_type == "non_place" and body.place is not None:
+        raise HTTPException(status_code=400, detail="장소가 없는 미션에는 장소 정보를 보낼 수 없습니다.")
     if not isinstance(recommendation.steps, list) or len(recommendation.steps) != 5:
         raise HTTPException(status_code=400, detail="대체 추천 단계 정보가 올바르지 않습니다.")
 
@@ -231,7 +237,11 @@ def replace_mission(
         status="in_progress",
         estimated_duration_minutes=recommendation.estimated_duration_minutes,
         estimated_cost=recommendation.estimated_cost,
-        place_info={"placeId": body.place_id} if body.place_id else None,
+        place_info=(
+            body.place.model_dump()
+            if body.place is not None
+            else {"placeId": body.place_id} if body.place_id else None
+        ),
     )
     old_mission.status = "replaced"
     db.add(new_mission)
