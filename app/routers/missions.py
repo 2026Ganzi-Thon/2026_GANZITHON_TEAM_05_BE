@@ -20,11 +20,22 @@ router = APIRouter(prefix="/missions", tags=["미션 수행"])
 RESUMABLE_DAYS = 7
 
 
+class PlaceSnapshotIn(BaseModel):
+    placeId: str
+    name: str = Field(min_length=1, max_length=200)
+    address: str = Field(max_length=500)
+    latitude: float = Field(ge=-90, le=90, allow_inf_nan=False)
+    longitude: float = Field(ge=-180, le=180, allow_inf_nan=False)
+    distanceMeters: int = Field(ge=0, le=20000)
+    walkingMinutes: int | None = Field(default=None, ge=0)
+
+
 class MissionStartIn(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     recommendation_id: UUID = Field(alias="recommendationId")
     place_id: str | None = Field(alias="placeId")
+    place: PlaceSnapshotIn | None = None
 
 
 class MissionStartedOut(BaseModel):
@@ -215,6 +226,18 @@ def start_mission(
     if recommendation.mission_type == "non_place" and body.place_id is not None:
         raise HTTPException(status_code=400, detail="장소가 없는 미션에는 placeId를 보낼 수 없습니다.")
 
+    if body.place is not None and body.place.placeId != body.place_id:
+        raise HTTPException(
+            status_code=400,
+            detail="선택한 장소 ID가 일치하지 않습니다."
+        )
+
+    if recommendation.mission_type == "non_place" and body.place is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="장소가 없는 미션에는 장소 정보를 보낼 수 없습니다."
+        )
+    
     mission = Mission(
         id=uuid4(),
         user_id=user.id,
@@ -229,7 +252,11 @@ def start_mission(
         estimated_cost=recommendation.estimated_cost,
         # Current request contract contains only placeId. Full Kakao details require
         # the agreed Kakao integration and are intentionally not fabricated here.
-        place_info={"placeId": body.place_id} if body.place_id else None,
+        place_info=(
+            body.place.model_dump()
+            if body.place is not None
+            else {"placeId": body.place_id} if body.place_id else None
+        ),
     )
     db.add(mission)
     try:
