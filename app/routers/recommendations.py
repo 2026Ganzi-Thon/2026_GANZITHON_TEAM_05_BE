@@ -15,7 +15,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Recommendation, User
+from app.models import Mission, Recommendation, User
 from app.security import current_user
 
 router = APIRouter(prefix="/missions", tags=["미션 추천"])
@@ -305,6 +305,8 @@ def _request_upstage(
     # LETIT_STRICT_BUDGET_V3: concise, non-redundant AI prompt.
     prompt = (
         "한국어 일상 미션 2개를 서로 다르게 추천하세요. JSON 객체만 반환하세요. "
+        "최근 수행 활동과 제목뿐 아니라 핵심 행동이 같은 추천은 피하세요. "
+        "두 미션의 활동 목적과 행동을 명확히 다르게 구성하세요. "
         f"이동 범위는 energyLevel만 따릅니다: {ENERGY_SCOPE_RULES[conditions.energy_level]} "
         "0단계는 집 안 전용(non_place), 1~2단계는 외출(place 또는 non_place), "
         "3~4단계는 외부 장소 방문(place)입니다. "
@@ -329,7 +331,7 @@ def _request_upstage(
         '{"order":5,"text":"..."}],"estimatedDurationMinutes":30,"estimatedCost":15000}]}\n'
         f"조건: {json.dumps(prompt_data, ensure_ascii=False)}\n"
         f"추가 요청: {additional_instructions or '없음'}\n"
-        f"제외 제목: {json.dumps(excluded_titles, ensure_ascii=False)}"
+        f"최근 수행 활동과 제외할 추천: {json.dumps(excluded_titles, ensure_ascii=False)}"
     )
     payload = json.dumps({
         "model": "solar-pro4",
@@ -400,9 +402,23 @@ def create_recommendations(
     )
     excluded_titles = [row.title for row in excluded_rows]
 
+    # LETIT_RECENT_MISSIONS_V1: user's 10 most recent actually started missions.
+    # Use titles + brief descriptions to avoid rephrasing the same activity.
+    recent_missions = (
+        db.query(Mission)
+        .filter(Mission.user_id == user.id)
+        .order_by(Mission.started_at.desc(), Mission.id.desc())
+        .limit(10)
+        .all()
+    )
+    recent_context = [
+        f"{m.title} - {m.description[:100]}" for m in recent_missions
+    ]
+    exclusion_context = excluded_titles + recent_context
+
     fallback_used = False
     try:
-        candidates = _request_upstage(body.conditions, excluded_titles)
+        candidates = _request_upstage(body.conditions, exclusion_context)
         candidates = [_normalize_ai_place_category(item) for item in candidates]
         # Validate model-controlled fields before they are persisted.
         validated = [RecommendationOut.model_validate({
