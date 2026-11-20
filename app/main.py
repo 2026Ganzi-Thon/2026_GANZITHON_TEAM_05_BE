@@ -63,8 +63,6 @@ def health_db():
 
 app.include_router(auth.router, prefix='/api/v1')
 app.include_router(users.router, prefix='/api/v1')
-app.include_router(auth.router, prefix="/api/v1")
-app.include_router(users.router, prefix="/api/v1")
 
 # B 담당: 미션 추천·수행·장소
 app.include_router(recommendations.router, prefix="/api/v1")
