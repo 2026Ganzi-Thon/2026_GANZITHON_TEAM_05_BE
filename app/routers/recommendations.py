@@ -241,7 +241,37 @@ def _fallback_recommendations(conditions: MissionConditions) -> list[dict]:
             ],
         },
     }
-    choices = priced.get(budget, {}).get(energy, free[energy])
+    # For indoor / doorstep missions, purchased supplies may be used indoors.
+    # Estimates are illustrative, not confirmed shop prices.
+    if energy in (0, 1) and budget != 0:
+        candidates = (
+            [
+                ("집 안에서 색연필로 그림 그리기", "간단한 미술 재료로 집 안에서 그림을 그려요.", 4000,
+                 ["집 안에서 색연필을 준비해요", "종이를 펼쳐요", "좋아하는 풍경을 그려요", "색을 칠해요", "정리해요"]),
+                ("집 안에서 작은 만들기", "간단한 만들기 재료로 집 안에서 쉬어가요.", 7000,
+                 ["집 안에서 재료를 준비해요", "설명서를 읽어요", "조립을 시작해요", "완성해요", "정리해요"]),
+            ] if energy == 0 else [
+                ("집 앞에서 음료 즐기기", "준비한 음료를 들고 건물 밖에서 쉬어요.", 5000,
+                 ["예산 내 음료를 준비해요", "건물 밖으로 나가요", "집 앞에서 마셔요", "잠깐 쉬어요", "집으로 돌아와요"]),
+                ("집 앞에서 간식 먹기", "간식을 준비해 집 앞에서 바람을 쐬어요.", 8000,
+                 ["간식을 준비해요", "건물 밖으로 나가요", "집 앞에서 간식을 즐겨요", "주변을 둘러봐요", "집으로 돌아와요"]),
+            ]
+        )
+        if budget in (50_000, None):
+            if energy == 0:
+                candidates = [("집 안에서 취미 키트 만들기", "집 안에서 취미 키트를 활용해 만들기를 해요.", 18_000,
+                               ["취미 키트를 준비해요", "집 안에서 작업 공간을 정해요", "설명서를 읽어요", "만들기를 진행해요", "재료를 정리해요"])]
+            else:
+                candidates = [("집 앞에서 도시락 즐기기", "준비한 도시락과 음료를 집 앞에서 즐겨요.", 15_000,
+                               ["도시락과 음료를 준비해요", "건물 밖으로 나가요", "집 앞 안전한 곳에 앉아요", "식사를 즐겨요", "주변을 정리하고 돌아와요"])]
+        choices = [
+            (title, desc, "non_place", None, 15, cost, steps)
+            for title, desc, cost, steps in candidates
+        ]
+        if budget in (50_000, None):
+            choices.append(free[energy][0])
+    else:
+        choices = priced.get(budget, {}).get(energy, free[energy])
     time_cap = {"10min": 10, "30min": 30, "60min": 60}.get(conditions.time_limit)
     result = []
     for title, description, mission_type, category, minutes, cost, steps in choices:
@@ -272,51 +302,34 @@ def _request_upstage(
         raise RuntimeError("UPSTAGE_API_KEY is not configured")
 
     prompt_data = conditions.model_dump(by_alias=True)
+    # LETIT_STRICT_BUDGET_V3: concise, non-redundant AI prompt.
     prompt = (
-        "다음 조건에 맞는 부담이 적고 안전한 일상 미션을 정확히 2개 만들어 주세요. "
-        "절대 규칙: 외출 장소와 이동 범위는 energyLevel 하나로만 결정합니다. "
-        f"energyLevel={conditions.energy_level}: {ENERGY_SCOPE_RULES[conditions.energy_level]} "
-        "0단계는 missionType=non_place이며 1~2단계는 place와 non_place 모두 허용됩니다. 3~4단계는 place입니다. "
-        "1~4단계에서는 반드시 건물 밖에서 활동해야 합니다. 집 안 활동을 절대로 추천하지 마세요. "
-        "0단계는 반드시 집 안 활동만 추천하고 두 추천 모두 베란다·테라스처럼 특정 시설을 요구하면 안 됩니다. "
-        "mood, barriers, distanceLimit, timeLimit, budgetLimit는 정해진 이동 범위 안에서 "
-        "활동의 종류와 난이도, 시간, 비용만 조정합니다. "
-        "distanceLimit가 에너지 단계와 충돌하면 반드시 에너지 단계를 우선합니다. "
-        "카카오 장소 검색 반경은 1단계 200m, 2단계 800m, 3단계 2km, 4단계 5km입니다. "
-        "실제 교통·도보 소요시간을 보장하거나 특정 장소명을 지어내지 마세요. "
-        "이동 범위는 활동과 5개 단계에서 실제로 지키되 제목·설명에 정책을 해설하거나 반복하지 마세요. "
-        "title은 자연스러운 한국어로 20자 이내의 간결한 활동명으로 작성하세요. "
-        "description은 사용자에게 보여주는 카드 문구입니다. 45자 이내의 한 문장으로 작성하세요. "
-        "설명에는 무엇을 하고 어떤 기분을 느낄 수 있는지만 담고 이동 반경·거리 수치·조건 설명을 넣지 마세요. "
-        "title과 description에 energyLevel, missionType, placeCategory, 직선거리, 검색 반경, km, m 같은 개발 용어나 수치를 적지 마세요. "
-        "미션의 자세한 수행 방법은 steps 5개에만 담고 카드 문구에는 반복하지 마세요. "
-        "조건에 맞는 서로 다른 두 활동을 제안하고 특정 물건을 구매해야만 완료되는 미션은 가급적 피하세요. "
-        "예산 선택은 활동의 희망 가격대를 의미합니다. "
-        "budgetLimit=0이면 반드시 무료 활동만 추천하세요. "
-        "budgetLimit=10000이면 0~10000원 이내 활동을 추천하세요. "
-        "budgetLimit=50000이면 10000원 초과~50000원 이내 활동을 우선 추천하세요. "
-        "budgetLimit=null이면 가격 제한 없이 폭넓게 추천하되 "
-        "최대 200000원 수준까지 고려하고 두 미션의 가격대를 다양하게 구성하세요. "
-        "예산이 넉넉한 경우에도 energyLevel에 따른 이동 범위를 반드시 지키세요. "
-        "실제 가격을 확인하지 않은 시설이나 체험의 비용을 확정적으로 안내하지 마세요. "
-        "estimatedCost는 해당 활동의 합리적인 예상 비용을 원 단위 정수로 작성하세요. "
-        "이동 범위와 예산에 적합한 활동이 부족하면 무리하게 가격을 높이지 마세요. "
-        "한국어로 작성하고, 선택한 시간 범위를 넘지 마세요. "
-        "placeCategory는 convenience_store, park, cafe, other 중 하나만 사용하세요. "
-        "커피숍은 cafe, 편의점은 convenience_store, 공원은 park로 표기하세요. "
-        "장소를 특정해야 하는 미션은 missionType=place와 placeCategory를 지정하고, "
-        "그 외에는 missionType=non_place, placeCategory=null로 작성하세요. "
-        "각 미션의 steps는 실행 가능한 순서로 정확히 5개 작성하세요. "
-        "제외할 기존 미션과 제목이 겹치지 않게 하세요. 설명이나 마크다운 없이 JSON 객체만 반환하세요.\n"
-        '형식: {"recommendations":[{"title":"...","description":"...",'
-        '"energyLevel":0,"missionType":"non_place","placeCategory":null,'
-        '"steps":[{"order":1,"text":"준비해요"},{"order":2,"text":"이동해요"},'
-        '{"order":3,"text":"활동해요"},{"order":4,"text":"주변을 살펴요"},'
-        '{"order":5,"text":"마무리해요"}],'
-        '"estimatedDurationMinutes":10,"estimatedCost":0}]}\n'
+        "한국어 일상 미션 2개를 서로 다르게 추천하세요. JSON 객체만 반환하세요. "
+        f"이동 범위는 energyLevel만 따릅니다: {ENERGY_SCOPE_RULES[conditions.energy_level]} "
+        "0단계는 집 안 전용(non_place), 1~2단계는 외출(place 또는 non_place), "
+        "3~4단계는 외부 장소 방문(place)입니다. "
+        "0단계에서 두 미션 모두 베란다·마당 등 특수 시설을 요구하지 마세요. "
+        "기분·장벽·시간은 범위 내 활동 선택에 활용하고 거리 선택보다 에너지 범위를 우선하세요. "
+        "예산 규칙(estimatedCost, 원): 0은 둘 다 0원, 10000은 둘 다 1~10000원, "
+        "50000은 둘 다 0~50000원이되 하나 이상은 10000~50000원, "
+        "null은 둘 다 0~100000원이되 하나 이상은 10000~100000원입니다. "
+        "비용은 활동에 실제로 필요한 구매·이용료의 합리적인 추정치여야 하며 무료 활동의 가격을 임의로 높이지 마세요. "
+        "이동 범위와 예산이 충돌하면 이동 범위를 우선하되 집 안 취미 재료처럼 수행 가능한 유료 활동을 고려하세요. "
+        "실제 업장 가격·교통 시간을 확인한 것처럼 말하거나 특정 상호명을 지어내지 마세요. "
+        "선택한 timeLimit와 예산 상한을 넘기지 마세요. "
+        "title은 20자 이내, description은 45자 이내 한 문장으로 쓰고 거리 수치·정책·개발 용어를 노출하지 마세요. "
+        "각 미션의 steps는 순서대로 정확히 5개이며 실제 수행 가능한 내용이어야 합니다. "
+        "placeCategory는 convenience_store, park, cafe, other 중 하나만 사용하고 "
+        "missionType=non_place일 때는 null로 쓰세요. "
+        "기존 제목을 반복하지 마세요. 다음 스키마의 필드를 모두 포함하세요.\n"
+        '{"recommendations":[{"title":"...","description":"...",'
+        '"energyLevel":3,"missionType":"place","placeCategory":"cafe",'
+        '"steps":[{"order":1,"text":"..."},{"order":2,"text":"..."},'
+        '{"order":3,"text":"..."},{"order":4,"text":"..."},'
+        '{"order":5,"text":"..."}],"estimatedDurationMinutes":30,"estimatedCost":15000}]}\n'
         f"조건: {json.dumps(prompt_data, ensure_ascii=False)}\n"
         f"추가 요청: {additional_instructions or '없음'}\n"
-        f"제외할 미션 제목: {json.dumps(excluded_titles, ensure_ascii=False)}"
+        f"제외 제목: {json.dumps(excluded_titles, ensure_ascii=False)}"
     )
     payload = json.dumps({
         "model": "solar-pro4",
@@ -417,6 +430,17 @@ def create_recommendations(
                     raise ValueError("AI recommendation exceeds time limit")
             if body.conditions.budget_limit is not None and item.estimated_cost > body.conditions.budget_limit:
                 raise ValueError("AI recommendation exceeds budget")
+        costs = [item.estimated_cost for item in validated]
+        budget = body.conditions.budget_limit
+        if budget == 0 and any(cost != 0 for cost in costs):
+            raise ValueError("budget 0 must be free")
+        if budget == 10_000 and any(not 1 <= cost <= 10_000 for cost in costs):
+            raise ValueError("budget 10000 requires paid activities")
+        if budget == 50_000 and not any(10_000 <= cost <= 50_000 for cost in costs):
+            raise ValueError("budget 50000 requires one mid-priced activity")
+        if budget is None and (any(cost > 100_000 for cost in costs)
+                               or not any(10_000 <= cost <= 100_000 for cost in costs)):
+            raise ValueError("unlimited budget requires one 10000~100000 activity")
     except (RuntimeError, ValueError, KeyError, TypeError, ValidationError, json.JSONDecodeError) as exc:
         # Safe operational diagnostics: no user conditions, token, API key or raw response.
         if isinstance(exc, ValidationError):
